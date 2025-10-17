@@ -1,4 +1,4 @@
-# Streamlit Uni Grade Calculator — reliable editing, live fraction→percent conversion, working stacked bar
+# Streamlit Uni Grade Calculator — reliable editing, live fraction→percent conversion, thick stacked bar
 # Save as: streamlit_app.py
 
 import io
@@ -205,14 +205,17 @@ df_state = st.session_state.tables.get(subject_key, df_from_subject(subject))
 # 1) Show editor (unique key per subject)
 df_edit = editor(df_state, key=f"table_{subject_key}")
 
-# 2) Normalize any fraction / numeric text immediately and refresh if changed
+# 2) Immediately persist any table edits (so metrics/graph stay in sync even if only weights changed)
+st.session_state.tables[subject_key] = df_edit.copy()
+
+# 3) Normalize any fraction / numeric text immediately and refresh if changed
 df_norm = normalize_marks_in_df(df_edit)
 if not df_norm.equals(df_edit):
     st.session_state.tables[subject_key] = df_norm
     st.rerun()
 
-# 3) Use the normalized dataframe for calculations/saving
-df = df_norm.copy()
+# 4) Use the normalized dataframe for calculations & display
+df = st.session_state.tables[subject_key].copy()
 
 # Guarantee expected columns and order
 for c in ["Name","Type","Weight %","Mark"]:
@@ -236,9 +239,8 @@ with m3:
     st.metric("Required avg on remaining to pass",
               "Impossible (no remaining weight)" if stats['needed_avg_remaining'] == math.inf else f"{stats['needed_avg_remaining']:.2f}%")
 
-# ---------- Save back to session (keeps metrics/graph live when switching subjects) ----------
+# ---------- Save back to session (keeps JSON export up-to-date) ----------
 
-st.session_state.tables[subject_key] = df.copy()
 st.session_state.book[subject_key] = subject_from_df(subject_key, df)
 
 # ---------- Progress chart (per subject) ----------
@@ -258,12 +260,14 @@ chart_df = pd.DataFrame({
     "Label": [f"{contrib:.1f}%", f"{completed_but_not_contrib:.1f}%", f"{remaining:.1f}%"]
 })
 
-# Robust single-row stacked bar (use constant categorical Y)
-bar = alt.Chart(chart_df).mark_bar().encode(
+# Thick single-row stacked bar
+bar = alt.Chart(chart_df).mark_bar(size=50).encode(
     y=alt.Y("Row:N", axis=None),
-    x=alt.X("Value:Q", stack="zero", axis=alt.Axis(title=None, labels=False, ticks=False), scale=alt.Scale(domain=[0, 100])),
+    x=alt.X("Value:Q", stack="zero",
+            axis=alt.Axis(title=None, labels=False, ticks=False),
+            scale=alt.Scale(domain=[0, 100])),
     color=alt.Color("Segment:N", legend=alt.Legend(orient="top"))
-).properties(height=90, width=800)
+).properties(height=120, width=900)
 
 labels = alt.Chart(chart_df).mark_text(baseline="middle").encode(
     y=alt.Y("Row:N"),
@@ -299,4 +303,4 @@ st.download_button(
 st.divider()
 st.write(":bulb: **Tips**")
 st.write("- Marks accept `75` or `2/5`. They auto-convert to a percentage with one decimal place.")
-st.write("- If editing ever feels 'stuck', switching subjects forces a refresh; it should be smooth now.")
+st.write("- The stacked bar and metrics always reflect the table above for the selected subject.")
