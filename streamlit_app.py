@@ -1,24 +1,5 @@
-# Streamlit Uni Grade Calculator — Load/Save JSON + Multi‑subject (Compat)
+# Streamlit Uni Grade Calculator — robust editor + live fraction→percent conversion
 # Save as: streamlit_app.py
-# Run:
-#   pip install -r requirements.txt
-#   streamlit run streamlit_app.py
-#
-# JSON schema supported (example):
-# {
-#   "Math2": {
-#     "title": "Math2",
-#     "assessments": [
-#       {"name": "M1", "kind": "Quiz", "weight": 5.0, "mark": 70.0},
-#       ...
-#     ]
-#   },
-#   "Data Analytics": { ... }
-# }
-#
-# - Load: use the file uploader (left sidebar).
-# - Edit: pick a subject, change rows/marks (mark can be "75" or "14/20").
-# - Save: buttons to download JSON (all subjects) or CSV (current subject).
 
 import io
 import json
@@ -27,12 +8,13 @@ from typing import Optional, Dict, Any
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
-st.set_page_config(page_title="Uni Grade Calculator", layout="centered")
+st.set_page_config(page_title="Uni Grade Calculator (Web)", layout="centered")
 
 # ---------- Helpers ----------
 
-def parse_mark(x: str) -> Optional[float]:
+def parse_mark(x) -> Optional[float]:
     """Return the mark as a percentage in [0, 100] if possible, else None."""
     if x is None:
         return None
@@ -51,16 +33,56 @@ def parse_mark(x: str) -> Optional[float]:
     except Exception:
         return None
 
+def format_pct_or_empty(val: Optional[float]) -> str:
+    return "" if val is None else f"{float(val):.1f}"
+
+def normalize_marks_in_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert any 'a/b' or numeric strings to a standard percentage string with one decimal."""
+    df2 = df.copy()
+    if "Mark" in df2.columns:
+        df2["Mark"] = df2["Mark"].apply(parse_mark).apply(format_pct_or_empty)
+        # Ensure object dtype (best compatibility for editing)
+        df2["Mark"] = df2["Mark"].astype(object)
+    return df2
+
 def editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
-    """Backwards compatible editable table."""
+    """Editable table with explicit column config to prevent type glitches."""
     ed = getattr(st, "data_editor", None) or getattr(st, "experimental_data_editor", None)
     if ed is None:
-        st.warning("Your Streamlit is very old; showing read‑only table. Upgrade Streamlit for editing.")
+        st.warning("Your Streamlit is very old; showing read-only table. Upgrade Streamlit for editing.")
         st.dataframe(df)
         return df.copy()
-    # Try with nicer args; fall back if TypeError on older versions
+
+    # Ensure consistent dtypes before rendering
+    df = df.copy()
+    # Mark must be object/str so users can enter things like "14/20"
+    if "Mark" in df.columns:
+        df["Mark"] = df["Mark"].astype(object).fillna("")
+    if "Weight %" in df.columns:
+        df["Weight %"] = pd.to_numeric(df["Weight %"], errors="coerce")
+
+    col_config = {
+        "Name": st.column_config.TextColumn("Name", width="medium", help="Assessment name"),
+        "Type": st.column_config.TextColumn("Type", help="Quiz / Exam / Assignment etc."),
+        "Weight %": st.column_config.NumberColumn(
+            "Weight %",
+            help="Percent weight of this assessment",
+            min_value=0.0, max_value=100.0, step=0.5, format="%.1f"
+        ),
+        "Mark": st.column_config.TextColumn(
+            "Mark",
+            help="Enter 75 or 14/20. It will auto-convert to a percentage."
+        ),
+    }
+
     try:
-        return ed(df, num_rows="dynamic", use_container_width=True, key=key)
+        return ed(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config=col_config,
+            key=key
+        )
     except TypeError:
         return ed(df, key=key)
 
@@ -71,11 +93,14 @@ def df_from_subject(subject: Dict[str, Any]) -> pd.DataFrame:
             "Name": a.get("name", ""),
             "Type": a.get("kind", ""),
             "Weight %": a.get("weight", 0.0),
-            "Mark": "" if a.get("mark", None) is None else a.get("mark"),
+            "Mark": format_pct_or_empty(a.get("mark", None)),
         })
     if not rows:
         rows = [{"Name":"","Type":"Assessment","Weight %":0.0,"Mark":""}]
-    return pd.DataFrame(rows, columns=["Name","Type","Weight %","Mark"])
+    df = pd.DataFrame(rows, columns=["Name","Type","Weight %","Mark"])
+    # Use object dtype for best editor compatibility
+    df["Mark"] = df["Mark"].astype(object)
+    return df
 
 def subject_from_df(title: str, df: pd.DataFrame) -> Dict[str, Any]:
     subj = {"title": title, "assessments": []}
@@ -83,7 +108,6 @@ def subject_from_df(title: str, df: pd.DataFrame) -> Dict[str, Any]:
         name = str(r.get("Name", "")).strip()
         kind = str(r.get("Type", "Assessment")).strip() or "Assessment"
         weight = float(pd.to_numeric(r.get("Weight %", 0.0), errors="coerce") or 0.0)
-        # store mark as number if parseable, else null
         parsed = parse_mark(r.get("Mark"))
         mark = None if parsed is None else float(parsed)
         subj["assessments"].append({
@@ -117,16 +141,15 @@ def compute_stats(df: pd.DataFrame, pass_mark: float):
 # ---------- Sidebar: Load / Settings ----------
 
 st.title("Uni Grade Calculator (Web)")
-st.caption("Load/save JSON, switch subjects, edit rows. Mark accepts 75 or 14/20.")
+st.caption("Load/save JSON, switch subjects, edit rows. Mark accepts 75 or 14/20 (auto-converts to percent).")
 
 with st.sidebar:
     st.header("Load / Save")
     uploaded = st.file_uploader("Load JSON file", type=["json"], accept_multiple_files=False)
-    PASS_MARK = st.number_input("Goal mark (%)", 0.0, 100.0, 50.0, 1.0)
+    PASS_MARK = st.number_input("Pass mark (%)", 0.0, 100.0, 50.0, 1.0)
 
-# Session state for the whole book of subjects
+# Session state for the whole book of subjects + per-subject table cache
 if "book" not in st.session_state:
-    # default book with one sample subject
     st.session_state.book = {
         "Sample Subject": {
             "title": "Sample Subject",
@@ -139,6 +162,8 @@ if "book" not in st.session_state:
     }
 if "current" not in st.session_state:
     st.session_state.current = "Sample Subject"
+if "tables" not in st.session_state:
+    st.session_state.tables = {k: df_from_subject(v) for k, v in st.session_state.book.items()}
 
 # If a file is uploaded, load it into session
 if uploaded is not None:
@@ -146,8 +171,8 @@ if uploaded is not None:
         data = json.load(uploaded)
         if isinstance(data, dict) and all(isinstance(v, dict) for v in data.values()):
             st.session_state.book = data
-            # pick first subject
             st.session_state.current = list(data.keys())[0] if data else "New Subject"
+            st.session_state.tables = {k: df_from_subject(v) for k, v in data.items()}
             st.success("JSON loaded into the app.")
         else:
             st.error("Invalid JSON format. Expected a dict of subjects → {title, assessments:[...]}." )
@@ -159,10 +184,12 @@ if uploaded is not None:
 left, right = st.columns([2,1])
 with left:
     subject_names = list(st.session_state.book.keys())
-    current = st.selectbox("Subject", subject_names + ["+ Add new subject..."], index=subject_names.index(st.session_state.current) if st.session_state.current in subject_names else 0)
+    idx = subject_names.index(st.session_state.current) if st.session_state.current in subject_names else 0
+    current = st.selectbox("Subject", subject_names + ["+ Add new subject..."], index=idx)
 with right:
     if st.button("Delete subject", help="Remove the current subject") and current in st.session_state.book and len(st.session_state.book) > 1:
         del st.session_state.book[current]
+        st.session_state.tables.pop(current, None)
         st.session_state.current = list(st.session_state.book.keys())[0]
         st.rerun()
 
@@ -170,9 +197,10 @@ if current == "+ Add new subject...":
     new_name = st.text_input("New subject name", value="New Subject")
     if st.button("Create subject"):
         if new_name.strip() == "" or new_name in st.session_state.book:
-            st.warning("Choose a unique non‑empty name.")
+            st.warning("Choose a unique non-empty name.")
         else:
             st.session_state.book[new_name] = {"title": new_name, "assessments": []}
+            st.session_state.tables[new_name] = df_from_subject(st.session_state.book[new_name])
             st.session_state.current = new_name
             st.rerun()
 else:
@@ -181,8 +209,19 @@ else:
 # ---------- Data editor for current subject ----------
 
 subject = st.session_state.book[st.session_state.current]
-df = df_from_subject(subject)
-df = editor(df, key="table")
+df_state = st.session_state.tables.get(st.session_state.current, df_from_subject(subject))
+
+# 1) Show editor
+df_edit = editor(df_state, key=f"table_{st.session_state.current}")
+
+# 2) Normalize any fraction / numeric text immediately and refresh if changed
+df_norm = normalize_marks_in_df(df_edit)
+if not df_norm.equals(df_edit):
+    st.session_state.tables[st.session_state.current] = df_norm
+    st.rerun()
+
+# 3) Use the normalized dataframe for calculations/saving
+df = df_norm
 
 # Guarantee expected columns and order
 for c in ["Name","Type","Weight %","Mark"]:
@@ -208,12 +247,48 @@ with m3:
 
 # ---------- Save back to session ----------
 
-# Update the current subject from edited DF
+# Update the per-subject DataFrame cache
+st.session_state.tables[st.session_state.current] = df.copy()
+# Also update the structured book for JSON export
 st.session_state.book[st.session_state.current] = subject_from_df(st.session_state.current, df)
+
+# ---------- Progress chart (per subject, like your screenshot) ----------
+
+st.divider()
+st.markdown("### Progress Overview (this subject)")
+
+contrib = round(stats["contribution"], 1)
+completed_but_not_contrib = max(0.0, round(stats["completed_weight"] - stats["contribution"], 1))
+remaining = max(0.0, round(stats["remaining_planned_weight"], 1))
+
+chart_df = pd.DataFrame({
+    "Segment": ["Contribution so far", "Completed weight", "Planned Weight"],
+    "Value": [contrib, completed_but_not_contrib, remaining],
+    "Label": [f"{contrib:.1f}%", f"{completed_but_not_contrib:.1f}%", f"{remaining:.1f}%"]
+})
+
+# Build a horizontal stacked bar to 100%
+bar = alt.Chart(chart_df).mark_bar().encode(
+    x=alt.X("sum(Value):Q", axis=alt.Axis(title=None, labels=False, ticks=False), scale=alt.Scale(domain=[0, 100])),
+    y=alt.Y("N():Q", axis=None),  # fake single row
+    color=alt.Color("Segment:N", legend=alt.Legend(orient="top")),
+    order=alt.Order("Segment", sort="ascending"),
+    tooltip=[alt.Tooltip("Segment:N"), alt.Tooltip("Value:Q", format=".1f")]
+).properties(height=80, width=800)
+
+labels = alt.Chart(chart_df).mark_text(baseline="middle", dy=0).encode(
+    x=alt.X("sum(Value):Q", stack="center"),
+    y=alt.Y("N():Q"),
+    text="Label",
+    color=alt.value("white")
+)
+
+st.altair_chart(bar + labels, use_container_width=True)
+
+# ---------- Save / Export ----------
 
 st.divider()
 st.markdown("### Save / Export")
-
 
 # 1) Download full JSON (all subjects)
 json_bytes = json.dumps(st.session_state.book, indent=2).encode("utf-8")
@@ -237,7 +312,6 @@ st.download_button(
 )
 
 st.divider()
-st.write(":bulb: **Tips**") 
-st.write("- You can load your existing JSON, edit, then re‑download.")
-st.write("- Marks accept `75` or `14/20`. Saved JSON stores marks as numbers (percent) or null if blank.")
-st.write("- Add multiple subjects and switch between them via the dropdown above.")
+st.write(":bulb: **Tips**")
+st.write("- Marks accept `75` or `14/20`. They auto-convert to a percentage with one decimal place.")
+st.write("- If editing ever feels 'stuck', the subject switcher forces a refresh; but it should be smooth now.")
