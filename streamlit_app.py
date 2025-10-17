@@ -122,7 +122,7 @@ st.caption("Load/save JSON, switch subjects, edit rows. Mark accepts 75 or 14/20
 with st.sidebar:
     st.header("Load / Save")
     uploaded = st.file_uploader("Load JSON file", type=["json"], accept_multiple_files=False)
-    PASS_MARK = st.number_input("Pass mark (%)", 0.0, 100.0, 50.0, 1.0)
+    PASS_MARK = st.number_input("Goal mark (%)", 0.0, 100.0, 50.0, 1.0)
 
 # Session state for the whole book of subjects
 if "book" not in st.session_state:
