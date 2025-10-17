@@ -1,4 +1,4 @@
-# Streamlit Uni Grade Calculator — robust editor + live fraction→percent conversion
+# Streamlit Uni Grade Calculator — reliable editing, live fraction→percent conversion, working stacked bar
 # Save as: streamlit_app.py
 
 import io
@@ -28,7 +28,6 @@ def parse_mark(x) -> Optional[float]:
             if b <= 0:
                 return None
             return max(0.0, min((a / b) * 100.0, 100.0))
-        # plain number interpreted as a percentage already
         return max(0.0, min(float(s), 100.0))
     except Exception:
         return None
@@ -37,25 +36,21 @@ def format_pct_or_empty(val: Optional[float]) -> str:
     return "" if val is None else f"{float(val):.1f}"
 
 def normalize_marks_in_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert any 'a/b' or numeric strings to a standard percentage string with one decimal."""
+    """Convert 'a/b' or numeric strings to a standard percentage string with one decimal."""
     df2 = df.copy()
     if "Mark" in df2.columns:
-        df2["Mark"] = df2["Mark"].apply(parse_mark).apply(format_pct_or_empty)
-        # Ensure object dtype (best compatibility for editing)
-        df2["Mark"] = df2["Mark"].astype(object)
+        df2["Mark"] = df2["Mark"].apply(parse_mark).apply(format_pct_or_empty).astype(object)
     return df2
 
 def editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
     """Editable table with explicit column config to prevent type glitches."""
     ed = getattr(st, "data_editor", None) or getattr(st, "experimental_data_editor", None)
     if ed is None:
-        st.warning("Your Streamlit is very old; showing read-only table. Upgrade Streamlit for editing.")
+        st.warning("Old Streamlit detected; showing read-only table.")
         st.dataframe(df)
         return df.copy()
 
-    # Ensure consistent dtypes before rendering
     df = df.copy()
-    # Mark must be object/str so users can enter things like "14/20"
     if "Mark" in df.columns:
         df["Mark"] = df["Mark"].astype(object).fillna("")
     if "Weight %" in df.columns:
@@ -65,13 +60,11 @@ def editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
         "Name": st.column_config.TextColumn("Name", width="medium", help="Assessment name"),
         "Type": st.column_config.TextColumn("Type", help="Quiz / Exam / Assignment etc."),
         "Weight %": st.column_config.NumberColumn(
-            "Weight %",
-            help="Percent weight of this assessment",
+            "Weight %", help="Percent weight of this assessment",
             min_value=0.0, max_value=100.0, step=0.5, format="%.1f"
         ),
         "Mark": st.column_config.TextColumn(
-            "Mark",
-            help="Enter 75 or 14/20. It will auto-convert to a percentage."
+            "Mark", help="Enter 75 or 2/5. Auto-converts to a percentage."
         ),
     }
 
@@ -98,20 +91,17 @@ def df_from_subject(subject: Dict[str, Any]) -> pd.DataFrame:
     if not rows:
         rows = [{"Name":"","Type":"Assessment","Weight %":0.0,"Mark":""}]
     df = pd.DataFrame(rows, columns=["Name","Type","Weight %","Mark"])
-    # Use object dtype for best editor compatibility
     df["Mark"] = df["Mark"].astype(object)
     return df
 
 def subject_from_df(title: str, df: pd.DataFrame) -> Dict[str, Any]:
     subj = {"title": title, "assessments": []}
     for _, r in df.iterrows():
-        name = str(r.get("Name", "")).strip()
-        kind = str(r.get("Type", "Assessment")).strip() or "Assessment"
-        weight = float(pd.to_numeric(r.get("Weight %", 0.0), errors="coerce") or 0.0)
-        parsed = parse_mark(r.get("Mark"))
-        mark = None if parsed is None else float(parsed)
         subj["assessments"].append({
-            "name": name, "kind": kind, "weight": weight, "mark": mark
+            "name": str(r.get("Name", "")).strip(),
+            "kind": (str(r.get("Type", "Assessment")).strip() or "Assessment"),
+            "weight": float(pd.to_numeric(r.get("Weight %", 0.0), errors="coerce") or 0.0),
+            "mark": (lambda v: None if v is None else float(v))(parse_mark(r.get("Mark")))
         })
     return subj
 
@@ -124,11 +114,11 @@ def compute_stats(df: pd.DataFrame, pass_mark: float):
     planned_weight = float(weights.sum())
     remaining_planned_weight = max(0.0, 100.0 - completed_weight)
     current_avg_completed = (contribution / completed_weight) * 100.0 if completed_weight > 1e-9 else None
-    if remaining_planned_weight <= 1e-9:
-        needed_avg_remaining = 0.0 if contribution >= pass_mark else math.inf
-    else:
-        needed_avg_remaining = (pass_mark - contribution) / (remaining_planned_weight / 100.0)
-        needed_avg_remaining = max(0.0, min(needed_avg_remaining, 9999.0))
+    needed_avg_remaining = (
+        0.0 if remaining_planned_weight <= 1e-9 and contribution >= pass_mark
+        else (math.inf if remaining_planned_weight <= 1e-9
+              else max(0.0, min((pass_mark - contribution) / (remaining_planned_weight / 100.0), 9999.0)))
+    )
     return {
         "completed_weight": completed_weight,
         "contribution": contribution,
@@ -141,14 +131,14 @@ def compute_stats(df: pd.DataFrame, pass_mark: float):
 # ---------- Sidebar: Load / Settings ----------
 
 st.title("Uni Grade Calculator (Web)")
-st.caption("Load/save JSON, switch subjects, edit rows. Mark accepts 75 or 14/20 (auto-converts to percent).")
+st.caption("Load/save JSON, switch subjects, edit rows. Mark accepts 75 or 2/5 (auto-converts to percent).")
 
 with st.sidebar:
     st.header("Load / Save")
     uploaded = st.file_uploader("Load JSON file", type=["json"], accept_multiple_files=False)
     PASS_MARK = st.number_input("Pass mark (%)", 0.0, 100.0, 50.0, 1.0)
 
-# Session state for the whole book of subjects + per-subject table cache
+# Session state stores book (data), current subject key, and per-subject tables
 if "book" not in st.session_state:
     st.session_state.book = {
         "Sample Subject": {
@@ -165,7 +155,7 @@ if "current" not in st.session_state:
 if "tables" not in st.session_state:
     st.session_state.tables = {k: df_from_subject(v) for k, v in st.session_state.book.items()}
 
-# If a file is uploaded, load it into session
+# Load JSON (replaces everything)
 if uploaded is not None:
     try:
         data = json.load(uploaded)
@@ -173,7 +163,7 @@ if uploaded is not None:
             st.session_state.book = data
             st.session_state.current = list(data.keys())[0] if data else "New Subject"
             st.session_state.tables = {k: df_from_subject(v) for k, v in data.items()}
-            st.success("JSON loaded into the app.")
+            st.success("JSON loaded.")
         else:
             st.error("Invalid JSON format. Expected a dict of subjects → {title, assessments:[...]}." )
     except Exception as e:
@@ -208,20 +198,21 @@ else:
 
 # ---------- Data editor for current subject ----------
 
-subject = st.session_state.book[st.session_state.current]
-df_state = st.session_state.tables.get(st.session_state.current, df_from_subject(subject))
+subject_key = st.session_state.current
+subject = st.session_state.book[subject_key]
+df_state = st.session_state.tables.get(subject_key, df_from_subject(subject))
 
-# 1) Show editor
-df_edit = editor(df_state, key=f"table_{st.session_state.current}")
+# 1) Show editor (unique key per subject)
+df_edit = editor(df_state, key=f"table_{subject_key}")
 
 # 2) Normalize any fraction / numeric text immediately and refresh if changed
 df_norm = normalize_marks_in_df(df_edit)
 if not df_norm.equals(df_edit):
-    st.session_state.tables[st.session_state.current] = df_norm
+    st.session_state.tables[subject_key] = df_norm
     st.rerun()
 
 # 3) Use the normalized dataframe for calculations/saving
-df = df_norm
+df = df_norm.copy()
 
 # Guarantee expected columns and order
 for c in ["Name","Type","Weight %","Mark"]:
@@ -229,7 +220,7 @@ for c in ["Name","Type","Weight %","Mark"]:
         df[c] = "" if c != "Weight %" else 0.0
 df = df[["Name","Type","Weight %","Mark"]]
 
-# ---------- Stats ----------
+# ---------- Stats (always reflect current subject and latest edits) ----------
 
 stats = compute_stats(df, PASS_MARK)
 st.subheader("Subject summary")
@@ -245,40 +236,38 @@ with m3:
     st.metric("Required avg on remaining to pass",
               "Impossible (no remaining weight)" if stats['needed_avg_remaining'] == math.inf else f"{stats['needed_avg_remaining']:.2f}%")
 
-# ---------- Save back to session ----------
+# ---------- Save back to session (keeps metrics/graph live when switching subjects) ----------
 
-# Update the per-subject DataFrame cache
-st.session_state.tables[st.session_state.current] = df.copy()
-# Also update the structured book for JSON export
-st.session_state.book[st.session_state.current] = subject_from_df(st.session_state.current, df)
+st.session_state.tables[subject_key] = df.copy()
+st.session_state.book[subject_key] = subject_from_df(subject_key, df)
 
-# ---------- Progress chart (per subject, like your screenshot) ----------
+# ---------- Progress chart (per subject) ----------
 
 st.divider()
 st.markdown("### Progress Overview (this subject)")
 
+# Compute three segments to display (values sum to 100 when planned=100)
 contrib = round(stats["contribution"], 1)
 completed_but_not_contrib = max(0.0, round(stats["completed_weight"] - stats["contribution"], 1))
 remaining = max(0.0, round(stats["remaining_planned_weight"], 1))
 
 chart_df = pd.DataFrame({
+    "Row": ["All","All","All"],
     "Segment": ["Contribution so far", "Completed weight", "Planned Weight"],
     "Value": [contrib, completed_but_not_contrib, remaining],
     "Label": [f"{contrib:.1f}%", f"{completed_but_not_contrib:.1f}%", f"{remaining:.1f}%"]
 })
 
-# Build a horizontal stacked bar to 100%
+# Robust single-row stacked bar (use constant categorical Y)
 bar = alt.Chart(chart_df).mark_bar().encode(
-    x=alt.X("sum(Value):Q", axis=alt.Axis(title=None, labels=False, ticks=False), scale=alt.Scale(domain=[0, 100])),
-    y=alt.Y("N():Q", axis=None),  # fake single row
-    color=alt.Color("Segment:N", legend=alt.Legend(orient="top")),
-    order=alt.Order("Segment", sort="ascending"),
-    tooltip=[alt.Tooltip("Segment:N"), alt.Tooltip("Value:Q", format=".1f")]
-).properties(height=80, width=800)
+    y=alt.Y("Row:N", axis=None),
+    x=alt.X("Value:Q", stack="zero", axis=alt.Axis(title=None, labels=False, ticks=False), scale=alt.Scale(domain=[0, 100])),
+    color=alt.Color("Segment:N", legend=alt.Legend(orient="top"))
+).properties(height=90, width=800)
 
-labels = alt.Chart(chart_df).mark_text(baseline="middle", dy=0).encode(
-    x=alt.X("sum(Value):Q", stack="center"),
-    y=alt.Y("N():Q"),
+labels = alt.Chart(chart_df).mark_text(baseline="middle").encode(
+    y=alt.Y("Row:N"),
+    x=alt.X("Value:Q", stack="center"),
     text="Label",
     color=alt.value("white")
 )
@@ -290,28 +279,24 @@ st.altair_chart(bar + labels, use_container_width=True)
 st.divider()
 st.markdown("### Save / Export")
 
-# 1) Download full JSON (all subjects)
 json_bytes = json.dumps(st.session_state.book, indent=2).encode("utf-8")
 st.download_button(
     "Download JSON (all subjects)",
     data=json_bytes,
     file_name="grades.json",
-    mime="application/json",
-    help="Saves every subject in the app to a single JSON file."
+    mime="application/json"
 )
 
-# 2) Download current subject as CSV
 csv_buf = io.StringIO()
 df.to_csv(csv_buf, index=False)
 st.download_button(
     "Download CSV (current subject)",
     data=csv_buf.getvalue().encode("utf-8"),
-    file_name=f"{st.session_state.current.replace(' ','_')}.csv",
-    mime="text/csv",
-    help="Saves just the currently selected subject as a CSV."
+    file_name=f"{subject_key.replace(' ','_')}.csv",
+    mime="text/csv"
 )
 
 st.divider()
 st.write(":bulb: **Tips**")
-st.write("- Marks accept `75` or `14/20`. They auto-convert to a percentage with one decimal place.")
-st.write("- If editing ever feels 'stuck', the subject switcher forces a refresh; but it should be smooth now.")
+st.write("- Marks accept `75` or `2/5`. They auto-convert to a percentage with one decimal place.")
+st.write("- If editing ever feels 'stuck', switching subjects forces a refresh; it should be smooth now.")
