@@ -14,3 +14,4 @@ streamlit run streamlit_app.py
 - **Load** your `grades.json` via the sidebar file uploader.
 - Pick a subject, edit rows (Mark can be `75` or `14/20`).
 - **Download JSON (all subjects)** to save everything, or **Download CSV (current subject)**.
+ 
